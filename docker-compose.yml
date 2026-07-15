@@ -1,0 +1,83 @@
+services:
+  xianyu-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: xianyu-auto-reply:latest
+    container_name: xianyu-auto-reply
+    restart: unless-stopped
+    # 使用root用户避免权限问题
+    user: "0:0"
+    ports:
+      - "8085:8080"
+    volumes:
+      # 数据持久化
+      - ./data:/app/data:rw
+      - ./logs:/app/logs:rw
+      - ./global_config.yml:/app/global_config.yml:ro
+      # 可选：备份目录
+      - ./backups:/app/backups:rw
+      # 挂载我们编译好的前端静态文件
+      - ./static:/app/static:rw
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - TZ=Asia/Shanghai
+      - DB_PATH=/app/data/xianyu_data.db
+      - LOG_LEVEL=INFO
+      - DEBUG=false
+      - RELOAD=false
+      # SQL日志配置
+      - SQL_LOG_ENABLED=true
+      - SQL_LOG_LEVEL=INFO
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=edgeo2026
+      - JWT_SECRET_KEY=default-secret-key
+      - SESSION_TIMEOUT=3600
+      # 多用户系统配置
+      - MULTIUSER_ENABLED=true
+      - USER_REGISTRATION_ENABLED=true
+      - EMAIL_VERIFICATION_ENABLED=true
+      - CAPTCHA_ENABLED=true
+      - TOKEN_EXPIRE_TIME=86400
+      - AUTO_REPLY_ENABLED=true
+      - AUTO_DELIVERY_ENABLED=true
+      - AUTO_DELIVERY_TIMEOUT=30
+      - API_CARD_TIMEOUT=10
+      - BATCH_DATA_LOCK_TIMEOUT=5
+      # AI回复相关配置
+      - AI_REPLY_ENABLED=false
+      - DEFAULT_AI_MODEL=qwen-plus
+      - DEFAULT_AI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+      - AI_REQUEST_TIMEOUT=30
+      - AI_MAX_TOKENS=100
+      - WEBSOCKET_URL=wss://wss-goofish.dingtalk.com/
+      - HEARTBEAT_INTERVAL=15
+      - HEARTBEAT_TIMEOUT=5
+      - TOKEN_REFRESH_INTERVAL=3600
+      - TOKEN_RETRY_INTERVAL=300
+      - MESSAGE_EXPIRE_TIME=300000
+    networks:
+      - xianyu-network
+      - nginx-proxy-manager_default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+          cpus: '2.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+
+networks:
+  xianyu-network:
+    driver: bridge
+  nginx-proxy-manager_default:
+    external: true
