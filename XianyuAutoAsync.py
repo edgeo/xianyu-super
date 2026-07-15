@@ -2813,6 +2813,7 @@ class XianyuLive:
                 # 检查数据库中是否已有详情
                 existing_item = db_manager.get_item_info(self.cookie_id, item_id)
                 has_detail = existing_item and existing_item.get('item_detail') and existing_item['item_detail'].strip()
+                item_image = db_manager.extract_item_image(item)
 
                 batch_data.append({
                     'cookie_id': self.cookie_id,
@@ -2821,7 +2822,8 @@ class XianyuLive:
                     'item_description': '',  # 暂时为空
                     'item_category': str(item.get('category_id', '')),
                     'item_price': item.get('price_text', ''),
-                    'item_detail': json.dumps(item_detail, ensure_ascii=False)
+                    'item_detail': json.dumps(item_detail, ensure_ascii=False),
+                    'item_image': item_image
                 })
 
                 # 如果没有详情，添加到需要获取详情的列表

@@ -15,6 +15,52 @@ from loguru import logger
 
 class DBManager:
     """SQLite数据库管理，持久化存储Cookie和关键字"""
+    ITEM_IMAGE_CONTAINER_KEYS = ('pic_info', 'picInfo', 'detail_params', 'detailParams')
+    ITEM_IMAGE_URL_KEYS = ('picUrl', 'pic_url', 'imageUrl', 'image_url')
+
+    @staticmethod
+    def _parse_json_value(value: Any) -> Tuple[bool, Any]:
+        """解析 JSON 字符串，返回解析是否成功及其值。"""
+        if not isinstance(value, str):
+            return False, None
+        try:
+            return True, json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return False, None
+
+    def extract_item_image(self, item_detail: Any) -> str:
+        """从闲鱼商品详情 JSON 或字典中提取首个可用图片 URL。"""
+        if isinstance(item_detail, str):
+            is_json, item_detail = self._parse_json_value(item_detail)
+            if not is_json:
+                return ''
+        if not isinstance(item_detail, (dict, list)):
+            return ''
+
+        if isinstance(item_detail, dict):
+            for container_key in self.ITEM_IMAGE_CONTAINER_KEYS:
+                container = item_detail.get(container_key)
+                if not isinstance(container, dict):
+                    continue
+                for image_key in self.ITEM_IMAGE_URL_KEYS:
+                    image_url = container.get(image_key)
+                    if isinstance(image_url, str) and image_url.strip():
+                        return image_url.strip()
+
+        pending = [item_detail]
+        while pending:
+            current = pending.pop(0)
+            if isinstance(current, dict):
+                for key in self.ITEM_IMAGE_URL_KEYS:
+                    image_url = current.get(key)
+                    if isinstance(image_url, str) and image_url.strip():
+                        return image_url.strip()
+                pending.extend(value for value in current.values()
+                               if isinstance(value, (dict, list)))
+            elif isinstance(current, list):
+                pending.extend(value for value in current
+                               if isinstance(value, (dict, list)))
+        return ''
     
     def __init__(self, db_path: str = None):
         """初始化数据库连接和表结构"""
@@ -3773,6 +3819,7 @@ class DBManager:
             bool: 操作是否成功
         """
         try:
+            item_image = self.extract_item_image(item_detail)
             with self.lock:
                 cursor = self.conn.cursor()
 
@@ -3780,10 +3827,10 @@ class DBManager:
                 # 首先尝试插入，如果已存在则忽略
                 cursor.execute('''
                 INSERT OR IGNORE INTO item_info (cookie_id, item_id, item_title, item_description,
-                                               item_category, item_price, item_detail, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                                               item_category, item_price, item_detail, item_image, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ''', (cookie_id, item_id, item_title or '', item_description or '',
-                      item_category or '', item_price or '', item_detail or ''))
+                      item_category or '', item_price or '', item_detail or '', item_image))
 
                 # 如果是新插入的记录，直接返回成功
                 if cursor.rowcount > 0:
@@ -3816,6 +3863,10 @@ class DBManager:
                 if item_detail:
                     update_parts.append("item_detail = CASE WHEN (item_detail IS NULL OR item_detail = '' OR TRIM(item_detail) = '') THEN ? ELSE item_detail END")
                     params.append(item_detail)
+
+                if item_image:
+                    update_parts.append("item_image = ?")
+                    params.append(item_image)
 
                 if update_parts:
                     update_parts.append("updated_at = CURRENT_TIMESTAMP")
@@ -3866,6 +3917,13 @@ class DBManager:
                 logger.debug(f"跳过保存商品信息：商品详情为空 - {item_id}")
                 return False
 
+            item_json = item_data
+            if isinstance(item_data, str):
+                is_json, item_json = self._parse_json_value(item_data)
+                item_image = self.extract_item_image(item_json) if is_json else ''
+            else:
+                item_image = self.extract_item_image(item_data)
+
             with self.lock:
                 cursor = self.conn.cursor()
 
@@ -3882,17 +3940,29 @@ class DBManager:
                     if item_data is not None and item_data:
                         # 处理字符串类型的详情数据
                         if isinstance(item_data, str):
-                            cursor.execute('''
-                            UPDATE item_info SET
-                                item_detail = ?, updated_at = CURRENT_TIMESTAMP
-                            WHERE cookie_id = ? AND item_id = ?
-                            ''', (item_data, cookie_id, item_id))
+                            old_is_json, _ = self._parse_json_value(existing[1])
+                            if not is_json and old_is_json:
+                                cursor.execute('''
+                                UPDATE item_info SET
+                                    item_description = ?, updated_at = CURRENT_TIMESTAMP
+                                WHERE cookie_id = ? AND item_id = ?
+                                ''', (item_data, cookie_id, item_id))
+                            else:
+                                cursor.execute('''
+                                UPDATE item_info SET
+                                    item_detail = ?,
+                                    item_image = CASE WHEN ? != '' THEN ? ELSE item_image END,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE cookie_id = ? AND item_id = ?
+                                ''', (item_data, item_image, item_image, cookie_id, item_id))
                         else:
                             # 处理字典类型的详情数据（向后兼容）
                             cursor.execute('''
                             UPDATE item_info SET
                                 item_title = ?, item_description = ?, item_category = ?,
-                                item_price = ?, item_detail = ?, updated_at = CURRENT_TIMESTAMP
+                                item_price = ?, item_detail = ?,
+                                item_image = CASE WHEN ? != '' THEN ? ELSE item_image END,
+                                updated_at = CURRENT_TIMESTAMP
                             WHERE cookie_id = ? AND item_id = ?
                             ''', (
                                 item_data.get('title', ''),
@@ -3900,6 +3970,7 @@ class DBManager:
                                 item_data.get('category', ''),
                                 item_data.get('price', ''),
                                 json.dumps(item_data, ensure_ascii=False),
+                                item_image, item_image,
                                 cookie_id, item_id
                             ))
                         logger.info(f"更新商品信息（覆盖）: {item_id}")
@@ -3912,22 +3983,23 @@ class DBManager:
                     if isinstance(item_data, str):
                         # 直接保存字符串详情
                         cursor.execute('''
-                        INSERT INTO item_info (cookie_id, item_id, item_detail)
-                        VALUES (?, ?, ?)
-                        ''', (cookie_id, item_id, item_data))
+                        INSERT INTO item_info (cookie_id, item_id, item_detail, item_image)
+                        VALUES (?, ?, ?, ?)
+                        ''', (cookie_id, item_id, item_data, item_image))
                     else:
                         # 处理字典类型的详情数据（向后兼容）
                         cursor.execute('''
                         INSERT INTO item_info (cookie_id, item_id, item_title, item_description,
-                                             item_category, item_price, item_detail)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                                             item_category, item_price, item_detail, item_image)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         ''', (
                             cookie_id, item_id,
                             item_data.get('title', '') if item_data else '',
                             item_data.get('description', '') if item_data else '',
                             item_data.get('category', '') if item_data else '',
                             item_data.get('price', '') if item_data else '',
-                            json.dumps(item_data, ensure_ascii=False) if item_data else ''
+                            json.dumps(item_data, ensure_ascii=False) if item_data else '',
+                            item_image
                         ))
                     logger.info(f"新增商品信息: {item_id}")
 
@@ -4088,19 +4160,10 @@ class DBManager:
 
                     # 解析item_detail JSON
                     if item_info.get('item_detail'):
-                        try:
-                            item_info['item_detail_parsed'] = json.loads(item_info['item_detail'])
-                            # 提取图片URL提供给前端渲染
-                            if isinstance(item_info['item_detail_parsed'], dict):
-                                pic_info = item_info['item_detail_parsed'].get('pic_info', {})
-                                if isinstance(pic_info, dict) and pic_info.get('picUrl'):
-                                    item_info['item_image'] = pic_info['picUrl']
-                                else:
-                                    detail_params = item_info['item_detail_parsed'].get('detail_params', {})
-                                    if isinstance(detail_params, dict) and detail_params.get('picUrl'):
-                                        item_info['item_image'] = detail_params['picUrl']
-                        except:
-                            item_info['item_detail_parsed'] = {}
+                        is_json, parsed_detail = self._parse_json_value(item_info['item_detail'])
+                        item_info['item_detail_parsed'] = parsed_detail if is_json else {}
+                    if not item_info.get('item_image'):
+                        item_info['item_image'] = self.extract_item_image(item_info.get('item_detail'))
 
                     items.append(item_info)
 
@@ -4132,19 +4195,10 @@ class DBManager:
 
                     # 解析item_detail JSON
                     if item_info.get('item_detail'):
-                        try:
-                            item_info['item_detail_parsed'] = json.loads(item_info['item_detail'])
-                            # 提取图片URL提供给前端渲染
-                            if isinstance(item_info['item_detail_parsed'], dict):
-                                pic_info = item_info['item_detail_parsed'].get('pic_info', {})
-                                if isinstance(pic_info, dict) and pic_info.get('picUrl'):
-                                    item_info['item_image'] = pic_info['picUrl']
-                                else:
-                                    detail_params = item_info['item_detail_parsed'].get('detail_params', {})
-                                    if isinstance(detail_params, dict) and detail_params.get('picUrl'):
-                                        item_info['item_image'] = detail_params['picUrl']
-                        except:
-                            item_info['item_detail_parsed'] = {}
+                        is_json, parsed_detail = self._parse_json_value(item_info['item_detail'])
+                        item_info['item_detail_parsed'] = parsed_detail if is_json else {}
+                    if not item_info.get('item_image'):
+                        item_info['item_image'] = self.extract_item_image(item_info.get('item_detail'))
 
                     items.append(item_info)
 
@@ -4179,27 +4233,12 @@ class DBManager:
                     logger.warning(f"未找到要更新的商品: {item_id}")
                     return False
                 
-                old_detail, old_desc = row
-                
-                # 检查传入的是否为 JSON 格式
-                is_new_json = False
-                try:
-                    if item_detail.strip().startswith('{'):
-                        json.loads(item_detail)
-                        is_new_json = True
-                except:
-                    pass
+                old_detail, _ = row
+                is_new_json, _ = self._parse_json_value(item_detail)
                 
                 if not is_new_json:
                     # 传入的是纯文本详情描述
-                    # 检查原库里存的是否是 JSON
-                    old_is_json = False
-                    try:
-                        if old_detail and old_detail.strip().startswith('{'):
-                            json.loads(old_detail)
-                            old_is_json = True
-                    except:
-                        pass
+                    old_is_json, _ = self._parse_json_value(old_detail)
                     
                     if old_is_json:
                         # 原库里是 JSON，我们保留 JSON 并仅更新 item_description 字段
@@ -4217,11 +4256,14 @@ class DBManager:
                         ''', (item_detail, item_detail, cookie_id, item_id))
                 else:
                     # 传入的是 JSON
+                    item_image = self.extract_item_image(item_detail)
                     cursor.execute('''
                     UPDATE item_info SET
-                        item_detail = ?, updated_at = CURRENT_TIMESTAMP
+                        item_detail = ?,
+                        item_image = CASE WHEN ? != '' THEN ? ELSE item_image END,
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE cookie_id = ? AND item_id = ?
-                    ''', (item_detail, cookie_id, item_id))
+                    ''', (item_detail, item_image, item_image, cookie_id, item_id))
 
                 if cursor.rowcount > 0:
                     self.conn.commit()
@@ -4314,20 +4356,9 @@ class DBManager:
                             logger.debug(f"跳过批量保存商品信息：缺少商品标题 - {item_id}")
                             continue
 
-                        # 从 item_detail JSON 字符串中尝试提取图片 URL
+                        # 显式传入的 API 图片优先；没有时从详情 JSON 回退提取。
                         if not item_image and item_detail:
-                            try:
-                                parsed = json.loads(item_detail)
-                                if isinstance(parsed, dict):
-                                    pic_info = parsed.get('pic_info', {})
-                                    if isinstance(pic_info, dict) and pic_info.get('picUrl'):
-                                        item_image = pic_info['picUrl']
-                                    else:
-                                        detail_params = parsed.get('detail_params', {})
-                                        if isinstance(detail_params, dict) and detail_params.get('picUrl'):
-                                            item_image = detail_params['picUrl']
-                            except Exception as parse_e:
-                                logger.debug(f"从item_detail解析图片URL出错 {item_id}: {parse_e}")
+                            item_image = self.extract_item_image(item_detail)
 
                         # 使用 INSERT OR IGNORE + UPDATE 模式
                         cursor.execute('''
@@ -4339,7 +4370,7 @@ class DBManager:
 
                         if cursor.rowcount == 0:
                             # 记录已存在，进行条件更新
-                            # 对于 item_image，如果传入了新值且库里是空，或者即使有值也用新值覆盖（以确保图片是最新的）
+                            # 以本次 API 同步到的非空图片为准，覆盖历史图片。
                             update_sql = '''
                             UPDATE item_info SET
                                 item_title = CASE WHEN (item_title IS NULL OR item_title = '') AND ? != '' THEN ? ELSE item_title END,
@@ -4347,7 +4378,7 @@ class DBManager:
                                 item_category = CASE WHEN (item_category IS NULL OR item_category = '') AND ? != '' THEN ? ELSE item_category END,
                                 item_price = CASE WHEN (item_price IS NULL OR item_price = '') AND ? != '' THEN ? ELSE item_price END,
                                 item_detail = CASE WHEN (item_detail IS NULL OR item_detail = '' OR TRIM(item_detail) = '') AND ? != '' THEN ? ELSE item_detail END,
-                                item_image = CASE WHEN (item_image IS NULL OR item_image = '') AND ? != '' THEN ? ELSE item_image END,
+                                item_image = CASE WHEN ? != '' THEN ? ELSE item_image END,
                                 updated_at = CURRENT_TIMESTAMP
                             WHERE cookie_id = ? AND item_id = ?
                             '''
@@ -5173,9 +5204,10 @@ class DBManager:
             with self.lock:
                 cursor = self.conn.cursor()
                 cursor.execute('''
-                SELECT r.item_id, r.cookie_id, r.reply_content, r.created_at, r.updated_at, i.item_title, i.item_detail, i.item_price
+                SELECT r.item_id, r.cookie_id, r.reply_content, r.created_at, r.updated_at,
+                       i.item_title, i.item_detail, i.item_price, i.item_image
                     FROM item_replay r
-                    LEFT JOIN item_info i ON i.item_id = r.item_id
+                    LEFT JOIN item_info i ON i.item_id = r.item_id AND i.cookie_id = r.cookie_id
                     WHERE r.cookie_id = ?
                     ORDER BY r.updated_at DESC
                 ''', (cookie_id,))
@@ -5186,20 +5218,8 @@ class DBManager:
                 for row in cursor.fetchall():
                     item_info = dict(zip(columns, row))
                     
-                    # 提取图片URL提供给前端渲染商品回复列表
-                    if item_info.get('item_detail'):
-                        try:
-                            parsed_detail = json.loads(item_info['item_detail'])
-                            if isinstance(parsed_detail, dict):
-                                pic_info = parsed_detail.get('pic_info', {})
-                                if isinstance(pic_info, dict) and pic_info.get('picUrl'):
-                                    item_info['item_image'] = pic_info['picUrl']
-                                else:
-                                    detail_params = parsed_detail.get('detail_params', {})
-                                    if isinstance(detail_params, dict) and detail_params.get('picUrl'):
-                                        item_info['item_image'] = detail_params['picUrl']
-                        except:
-                            pass
+                    if not item_info.get('item_image'):
+                        item_info['item_image'] = self.extract_item_image(item_info.get('item_detail'))
 
                     items.append(item_info)
 
