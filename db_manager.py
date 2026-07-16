@@ -318,6 +318,14 @@ class DBManager:
                 self._execute_sql(cursor, "ALTER TABLE orders ADD COLUMN chat_id TEXT DEFAULT ''")
                 logger.info("orders 表 chat_id 列添加完成")
 
+            # 检查并添加 receiver_city 列到 orders 表（用于仪表盘地区统计）
+            try:
+                self._execute_sql(cursor, "SELECT receiver_city FROM orders LIMIT 1")
+            except sqlite3.OperationalError:
+                logger.info("正在为 orders 表添加 receiver_city 列...")
+                self._execute_sql(cursor, "ALTER TABLE orders ADD COLUMN receiver_city TEXT DEFAULT ''")
+                logger.info("orders 表 receiver_city 列添加完成")
+
             # 检查并添加 user_id 列（用于数据库迁移）
             try:
                 self._execute_sql(cursor, "SELECT user_id FROM cards LIMIT 1")
